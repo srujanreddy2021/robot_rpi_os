@@ -1,0 +1,9 @@
+RPLidar
+numpy
+scipy
+pygame
+smbus2
+pykalman
+opencv-python
+matplotlib
+scikit-learn
