@@ -37,16 +37,16 @@ class ManualControl:
                     self.turn_right()
 
     def move_forward(self):
-        self.motors.move_forward(10)  # Move forward by 10 cm
+        self.motors.move_forward(1)  # Move forward by 10 cm
 
     def move_backward(self):
-        self.motors.move_backward(10)  # Move backward by 10 cm
+        self.motors.move_backward(1)  # Move backward by 10 cm
 
     def turn_left(self):
-        self.motors.turn_left(15)  # Turn left by 15 degrees
+        self.motors.turn_left(5)  # Turn left by 15 degrees
 
     def turn_right(self):
-        self.motors.turn_right(15)  # Turn right by 15 degrees
+        self.motors.turn_right(5)  # Turn right by 15 degrees
 
     def check_obstacles(self):
         if self.lidar.detect_obstacles():
