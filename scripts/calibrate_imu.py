@@ -1,10 +1,12 @@
-import smbus
+import smbus2
 import time
 import numpy as np
+import json
+import os
 
 class MPU6050:
     def __init__(self, bus_number=1, address=0x68):
-        self.bus = smbus.SMBus(bus_number)
+        self.bus = smbus2.SMBus(bus_number)
         self.address = address
         self.accel_data = np.zeros(3)
         self.gyro_data = np.zeros(3)
@@ -55,16 +57,38 @@ def calibrate_imu():
     # Collect data for calibration
     num_samples = 1000
     gyro_bias = np.zeros(3)
+    accel_bias = np.zeros(3)
 
     for _ in range(num_samples):
         imu.read_raw_data()
         gyro_bias += imu.gyro_data
+        accel_bias += imu.accel_data
         time.sleep(0.01)
 
     gyro_bias /= num_samples
-    imu.kalman_bias = gyro_bias
-
-    print("Calibration complete. Gyro bias:", imu.kalman_bias)
+    accel_bias /= num_samples
+    
+    # Acceleration bias should have gravity removed from the z-axis
+    gravity_compensated = accel_bias.copy()
+    gravity_compensated[2] -= 1.0  # Remove gravity (1g) from z-axis
+    
+    # Save calibration data to a file
+    calibration_data = {
+        "gyro_bias": gyro_bias.tolist(),
+        "accel_bias": gravity_compensated.tolist(),
+    }
+    
+    # Define the calibration file path
+    calibration_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "src", "sensors", "calibration")
+    os.makedirs(calibration_dir, exist_ok=True)
+    calibration_file = os.path.join(calibration_dir, "imu_calibration.json")
+    
+    with open(calibration_file, 'w') as f:
+        json.dump(calibration_data, f)
+    
+    print(f"Calibration complete. Data saved to {calibration_file}")
+    print(f"Gyro bias: {gyro_bias}")
+    print(f"Accel bias: {gravity_compensated}")
 
 if __name__ == "__main__":
     calibrate_imu()
