@@ -14,12 +14,12 @@ class Lidar:
         self.running = False
         
         # Initialize the plot in polar coordinates
-        # plt.figure(figsize=(8, 8))
-        # self.ax = plt.subplot(111, projection='polar')
-        # self.ax.set_title('LIDAR Scan')
-        # self.line, = self.ax.plot([], [], 'r.', markersize=2)
-        # self.ax.set_rmax(5000)  # Adjust based on your LIDAR's range
-        # self.ax.grid(True)
+        plt.figure(figsize=(8, 8))
+        self.ax = plt.subplot(111, projection='polar')
+        self.ax.set_title('LIDAR Scan')
+        self.line, = self.ax.plot([], [], 'r.', markersize=2)
+        self.ax.set_rmax(5000)  # Adjust based on your LIDAR's range
+        self.ax.grid(True)
         
         # Get and print LIDAR info and health
         info = self.lidar.get_info()

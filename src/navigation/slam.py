@@ -67,7 +67,7 @@ class SLAM:
         # Create a 2x2 grid of subplots
         self.axes = {
             'map': self.fig.add_subplot(221),  # Top-left: Map view with path
-            'lidar': self.fig.add_subplot(222),  # Top-right: LiDAR points
+            'lidar': self.fig.add_subplot(222, projection='polar'),  # Top-right: LiDAR points with polar projection
             'camera': self.fig.add_subplot(223),  # Bottom-left: Camera features
             'imu': self.fig.add_subplot(224)  # Bottom-right: IMU data
         }
@@ -110,6 +110,8 @@ class SLAM:
         self.lidar.start()
         while self.running:
             try:
+                lidar_data = self.lidar.get_scan()
+                # print(f"LiDAR data: {lidar_data}")
                 self.update_map()
                 time.sleep(0.1)  # Control the processing rate
             except Exception as e:
@@ -152,8 +154,57 @@ class SLAM:
         features = [(kp.pt[0], kp.pt[1], kp.response) for kp in keypoints]
         return features
     
+    def estimate_visual_motion(self, current_features):
+        """Estimate motion from visual features between frames"""
+        # Store previous features if not already stored
+        if not hasattr(self, 'prev_features') or self.prev_features is None:
+            self.prev_features = current_features
+            return np.array([0.0, 0.0]), 0.0
+        
+        if not current_features or not self.prev_features:
+            return np.array([0.0, 0.0]), 0.0
+            
+        # Convert features to arrays for easier processing
+        if len(current_features) < 10 or len(self.prev_features) < 10:
+            return np.array([0.0, 0.0]), 0.0
+        
+        # Build arrays of points
+        prev_points = np.array([(x, y) for x, y, _ in self.prev_features])
+        curr_points = np.array([(x, y) for x, y, _ in current_features])
+        
+        # Find corresponding features (simple nearest neighbor for this example)
+        tree = KDTree(prev_points)
+        distances, indices = tree.query(curr_points, k=1)
+        
+        # Filter matches by distance
+        good_matches = distances < 20.0  # 20 pixel threshold
+        if np.sum(good_matches) < 5:
+            return np.array([0.0, 0.0]), 0.0
+            
+        src_pts = curr_points[good_matches]
+        dst_pts = prev_points[indices[good_matches]]
+        
+        # Compute translation and rotation (similar to scan_matching method)
+        src_centroid = np.mean(src_pts, axis=0)
+        dst_centroid = np.mean(dst_pts, axis=0)
+        
+        # Estimate translation
+        translation = dst_centroid - src_centroid
+        
+        # Estimate rotation (if needed)
+        rotation = 0.0  # Simple case
+        
+        # Update previous features with current features
+        self.prev_features = current_features
+        
+        # Scale translation to cm (assuming pixel-to-cm conversion factor)
+        pixel_to_cm = 0.1  # This needs calibration for your camera
+        translation = translation * pixel_to_cm
+        
+        return np.array([translation[0], translation[1]]), rotation
+    
     def update_position(self):
-        """Update position based on IMU data with Kalman filtering"""
+        """Update orientation based on IMU data with Kalman filtering"""
         accel_data = self.imu.get_acceleration()
         gyro_data = self.imu.get_gyroscope()
         
@@ -161,7 +212,6 @@ class SLAM:
         dt = 0.01  # 10ms update rate
         
         with self.lock:
-            # ---- Prediction step ----
             # Update orientation based on gyroscope with noise consideration
             orient_change = gyro_data[2] * dt
             self.orientation += orient_change
@@ -169,32 +219,8 @@ class SLAM:
             
             # Update orientation uncertainty
             self.orientation_uncertainty += 0.1 * dt  # Add process noise
-    
-            # Convert acceleration to robot frame
-            accel_robot = np.array([
-                accel_data[0] * np.cos(np.radians(self.orientation)) - 
-                accel_data[1] * np.sin(np.radians(self.orientation)),
-                accel_data[0] * np.sin(np.radians(self.orientation)) + 
-                accel_data[1] * np.cos(np.radians(self.orientation))
-            ]) * 100  # Convert to cm/s²
             
-            # Update velocity (v = v0 + a*t)
-            self.velocity += accel_robot * dt
-            
-            # Apply damping to velocity (simulating friction)
-            self.velocity *= 0.95  # Damping factor
-            
-            # Update position (x = x0 + v*t + 0.5*a*t²)
-            translation = self.velocity * dt + 0.5 * accel_robot * dt * dt
-            self.position += translation
-            
-            # Update position uncertainty
-            self.position_uncertainty += 1.0 * dt  # Add process noise
-            
-            # Add current position to path history
-            self.path_history.append(self.position.copy())
-            
-            # Store IMU data for visualization
+            # Store IMU data for visualization only
             self.imu_history.append({
                 'accel': accel_data.copy(), 
                 'gyro': gyro_data.copy(),
@@ -328,6 +354,94 @@ class SLAM:
             if len(self.map) > 10000:
                 self.map = self.map[-10000:]
     
+    def visual_lidar_fusion(self):
+        """Fuse visual features and LiDAR data for localization"""
+        
+        with self.lock:
+            # Get latest sensor data
+            visual_features = self.visual_features
+            lidar_data = self.lidar.get_scan()
+        
+        if not visual_features or not lidar_data:
+            return
+        
+        # Extract visual movement by tracking features between frames
+        # (This would require storing previous frame features)
+        visual_translation, visual_rotation = self.estimate_visual_motion(visual_features)
+        
+        # Extract LiDAR movement through scan matching
+        scan_points_local = []
+        for angle, distance in lidar_data:
+            # Convert to local Cartesian coordinates
+            distance_cm = distance * 100  # Convert m to cm
+            x_local = distance_cm * np.cos(np.radians(angle))
+            y_local = distance_cm * np.sin(np.radians(angle))
+            scan_points_local.append((x_local, y_local))
+        
+        lidar_translation, lidar_rotation = self.scan_matching(scan_points_local)
+        
+        # Fuse the estimates (simple weighted average for now)
+        translation = visual_translation * 0.3 + lidar_translation * 0.7
+        rotation = visual_rotation * 0.2 + lidar_rotation * 0.8
+        
+        # Update position and orientation
+        with self.lock:
+            self.position += translation
+            self.orientation += rotation
+            self.orientation = self.orientation % 360
+    
+    def apply_kalman_filter(self, visual_data, lidar_data, imu_data):
+        """Apply Kalman filter for sensor fusion"""
+        # State vector: [x, y, θ, vx, vy, ω]
+        # x, y: position
+        # θ: orientation
+        # vx, vy: linear velocities
+        # ω: angular velocity
+        
+        # Initialize state if not done already
+        if not hasattr(self, 'kalman_state'):
+            self.kalman_state = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            self.kalman_P = np.diag([100.0, 100.0, 10.0, 10.0, 10.0, 10.0])  # Uncertainty
+        
+        # Prediction step
+        dt = 0.01  # Time step
+        F = np.eye(6)  # State transition matrix
+        F[0, 3] = dt  # x += vx * dt
+        F[1, 4] = dt  # y += vy * dt
+        F[2, 5] = dt  # θ += ω * dt
+        
+        # Process noise covariance
+        Q = np.eye(6) * 0.1
+        
+        # Predict
+        self.kalman_state = F @ self.kalman_state
+        self.kalman_P = F @ self.kalman_P @ F.T + Q
+        
+        # Update with IMU measurements
+        if imu_data:
+            # IMU measurement model
+            H_imu = np.zeros((3, 6))
+            H_imu[0, 2] = 1.0  # Orientation
+            H_imu[1, 3] = 1.0  # vx
+            H_imu[2, 4] = 1.0  # vy
+            
+            # Measurement
+            z_imu = np.array([
+                imu_data['orientation'],
+                imu_data['velocity_x'],
+                imu_data['velocity_y']
+            ])
+            
+            # Measurement noise
+            R_imu = np.diag([5.0, 1.0, 1.0])
+            
+            # Kalman update
+            K = self.kalman_P @ H_imu.T @ np.linalg.inv(H_imu @ self.kalman_P @ H_imu.T + R_imu)
+            self.kalman_state = self.kalman_state + K @ (z_imu - H_imu @ self.kalman_state)
+            self.kalman_P = (np.eye(6) - K @ H_imu) @ self.kalman_P
+
+        # Similar updates for LiDAR and visual data
+    
     def visualize(self):
         """Visualize robot position, direction, LiDAR data and camera features"""
         with self.lock:
@@ -380,15 +494,15 @@ class SLAM:
         )
         
         # Draw arrow to show robot orientation/direction
-        arrow_length = 50  # 50 cm arrow length
+        arrow_length = 5  # 50 cm arrow length
         dx = arrow_length * np.cos(np.radians(orientation))
         dy = arrow_length * np.sin(np.radians(orientation))
         self.axes['map'].arrow(position[0], position[1], dx, dy, 
-                              head_width=20, head_length=30, 
+                              head_width=5, head_length=5, 
                               fc='red', ec='red')
         
         # Set map view properties
-        map_width = 800  # Show area in cm
+        map_width = 40  # Show area in cm
         self.axes['map'].set_xlim(position[0]-map_width/2, position[0]+map_width/2)
         self.axes['map'].set_ylim(position[1]-map_width/2, position[1]+map_width/2)
         self.axes['map'].set_title(f'Robot Path and Occupancy Grid (cm) - Pos: ({position[0]:.1f}, {position[1]:.1f})')
@@ -398,44 +512,19 @@ class SLAM:
         
         # ---- 2. Plot current LiDAR scan (top-right) ----
         if map_data:
-            # Get the latest scan points (last 100 points)
-            latest_scan = map_data[-100:] if len(map_data) > 100 else map_data
-            x_lidar, y_lidar = zip(*latest_scan)
-            
-            # Create a 2D histogram (density plot) of LiDAR points
-            heatmap, xedges, yedges = np.histogram2d(
-                x_lidar, y_lidar, 
-                bins=50, 
-                range=[[position[0]-400, position[0]+400], [position[1]-400, position[1]+400]]
-            )
-            extent = [xedges[0], xedges[-1], yedges[0], yedges[-1]]
-            
-            # Plot LiDAR heat map
-            self.axes['lidar'].imshow(
-                heatmap.T, 
-                origin='lower', 
-                extent=extent, 
-                cmap='plasma',
-                aspect='auto',
-                alpha=0.7
-            )
-            
-            # Plot LiDAR points
-            self.axes['lidar'].scatter(x_lidar, y_lidar, c='blue', s=5, alpha=0.5)
-            self.axes['lidar'].scatter(position[0], position[1], c='red', s=100, marker='o')
-            
-            # Draw arrow to show robot orientation/direction
-            self.axes['lidar'].arrow(position[0], position[1], dx, dy, 
-                                   head_width=20, head_length=30, 
-                                   fc='red', ec='red')
-            
-            # Set LiDAR view properties
-            self.axes['lidar'].set_xlim(position[0]-400, position[0]+400)
-            self.axes['lidar'].set_ylim(position[1]-400, position[1]+400)
-            self.axes['lidar'].set_title(f'LiDAR Scan (cm) - Orientation: {orientation:.1f}°')
-            self.axes['lidar'].set_xlabel('X Position (cm)')
-            self.axes['lidar'].set_ylabel('Y Position (cm)')
-            self.axes['lidar'].grid(True)
+            # Get latest scan data
+            scan_data = self.lidar.get_scan()
+            if scan_data:
+                angles = np.radians([point[0] for point in scan_data])  # Convert to radians
+                distances = [point[1] for point in scan_data]
+                
+                # Use existing polar subplot (don't try to set projection)
+                self.axes['lidar'].clear()
+                self.axes['lidar'].scatter(angles, distances, c='blue', s=5, alpha=0.8)
+                self.axes['lidar'].set_title(f'LiDAR Scan - Orientation: {orientation:.1f}°')
+                if distances:  # Check if distances list is not empty
+                    self.axes['lidar'].set_rmax(max(distances) * 1.1)  # Set radius limit
+                self.axes['lidar'].grid(True)
         
         # ---- 3. Plot camera feature data (bottom-left) ----
         if visual_features:
